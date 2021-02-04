@@ -1,7 +1,8 @@
-﻿using Massena.DataTables.Query.Extensions.Model;
+using Massena.DataTables.Query.Extensions.Model;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -70,7 +71,7 @@ namespace Massena.DataTables.Query.Extensions
         internal class Constants
         {
             public const string X = "x";
-            public const string Contains = "Contains";
+            public const string Contains = "Contains";            
             public const string Where = "Where";
             public const string Desc = "desc";
             public const string OrderBy = "OrderBy";
@@ -121,11 +122,14 @@ namespace Massena.DataTables.Query.Extensions
             {
                 try
                 {
-                    var properties = typeof(T).GetProperties();
+                    //Only retrieve properties listed on query
+                    var properties = typeof(T)
+                    .GetProperties()
+                    .Where(x => query.Filters.Any(p => p.Field.Equals(x.Name, StringComparison.OrdinalIgnoreCase)));
 
                     query.Filters.ForEach(filter =>
                     {
-                        var property = properties.SingleOrDefault(x => x.Name == filter.Field);
+                        var property = properties.SingleOrDefault(x => x.Name.Equals(filter.Field, StringComparison.OrdinalIgnoreCase));
                         if (property != null)
                             source = source.BuildWhereAndQuery(property, filter.Value);
                     });
@@ -143,37 +147,44 @@ namespace Massena.DataTables.Query.Extensions
         {
             if (query.Columns != null && query.Columns.Any())
             {
-                var columns = new List<Column>() { new Column { Name = "", Search = query.Search } };
-                columns.AddRange(query.Columns);
+                var columns = new List<Column>();
+                //Just add valid columns
+                columns.AddRange(
+                    query.Columns
+                    .Where(x => x.Search != null && !string.IsNullOrEmpty(x.Search.Value))
+                    .Where(x => !string.IsNullOrEmpty(x.Data))
+                );
+                //Get only referenced columns and not generic
+                var properties = typeof(T)
+                            .GetProperties()
+                            .Where(x => !x.PropertyType.IsGenericType)
+                            .Where(x => columns.Any(c => c.Name.Equals(x.Name, StringComparison.OrdinalIgnoreCase)))
+                            .ToList();
 
                 columns.ForEach(column =>
                 {
-                    if (column.Search != null && !string.IsNullOrEmpty(column.Search.Value))
+                    try
                     {
-                        try
+                        List<Expression> predicates = new List<Expression>();
+                        ParameterExpression parameter = Expression.Parameter(typeof(T), Constants.X);
+
+                        properties.ForEach(property =>
                         {
-                            var properties = typeof(T).GetProperties();
-                            List<Expression> predicates = new List<Expression>();
-                            ParameterExpression parameter = Expression.Parameter(typeof(T), Constants.X);
+                            if (!column.Data.Equals(property.Name, StringComparison.OrdinalIgnoreCase))
+                                return;
 
-                            properties.Where(x => !x.PropertyType.IsGenericType).ToList().ForEach(property =>
-                            {
-                                if (!string.IsNullOrEmpty(column.Data) && !column.Data.Equals(property.Name, StringComparison.OrdinalIgnoreCase))
-                                    return;
+                            Expression selector = Expression.PropertyOrField(parameter, property.Name);
+                            Expression predicate = selector.BuildPredicate(property, column.Search.Value);
 
-                                Expression selector = Expression.PropertyOrField(parameter, property.Name);
-                                Expression predicate = selector.BuildPredicate(property, column.Search.Value);
+                            if (predicate != null)
+                                predicates.Add(predicate);
+                        });
 
-                                if (predicate != null)
-                                    predicates.Add(predicate);
-                            });
-
-                            source = source.BuildWhereOrQuery(predicates, parameter);
-                        }
-                        catch
-                        {
-
-                        }
+                        source = source.BuildWhereOrQuery(predicates, parameter);
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine(ex.Message);
                     }
                 });
             }
@@ -196,7 +207,7 @@ namespace Massena.DataTables.Query.Extensions
 
             var whereMethod = typeof(Queryable).GetMethods().Where(x => x.Name == Constants.Where && x.IsGenericMethodDefinition).First(m =>
             {
-                return m.GetParameters().Count() == 2; 
+                return m.GetParameters().Count() == 2;
                 //TODO: Put more restriction here to ensure selecting the right overload the first overload that has 2 parameters
             });
 
@@ -252,8 +263,9 @@ namespace Massena.DataTables.Query.Extensions
 
                 source = source.InvokeQueryBuilder(predicate, parameter);
             }
-            catch
+            catch (Exception ex)
             {
+                Debug.WriteLine(ex.Message);
             }
 
             return source;
@@ -264,7 +276,8 @@ namespace Massena.DataTables.Query.Extensions
             if (property.PropertyType == typeof(string))
             {
                 Expression selectorValue = Expression.Constant(queryValue);
-                return Expression.Call(selector, typeof(string).GetMethod(Constants.Contains), new Expression[] { selectorValue });
+                var containsMethod = typeof(string).GetMethod(Constants.Contains, 0, new Type[] { typeof(string) });
+                return Expression.Call(selector, containsMethod, new Expression[] { selectorValue });
             }
             else
                 return TryConvertQueryValue(property, selector, queryValue);
