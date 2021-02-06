@@ -9,11 +9,186 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using static Massena.DataTables.Query.Extensions.Model.DataTablesQuery;
+using static Massena.DataTables.Query.Extensions.Model.VueDataTablesQuery;
 
 namespace Massena.DataTables.Query.Extensions
 {
     public static class QueryableExtensions
     {
+
+        #region VueDataTable
+
+        /// <summary>
+        /// Aplica o filtro do DataTables na consulta. 
+        /// </summary>
+        /// <typeparam name="TQueryDataType">Tipo do objeto que será retornado no DataTablesResponse, oriundo da query</typeparam>
+        /// <typeparam name="TResponse">Tipo de response que será enviado, contendo o <paramref name="TQueryDataType"/>. Esse objeto precisa herdar de <seealso cref="DataTablesResponse<>" /></typeparam>
+        /// <param name="source">Query não materializada que será utilizada para aplicação do filtro e ordenação</param>
+        /// <param name="query">Objeto query do datatables, contendo os filtros e a ordenação</param>
+        /// <returns>Esse método irá materializar a query, aplicando os filtros e a ordenação do DataTables</returns>
+        public static Task<TResponse> FilterDataTableAsync<TQueryDataType, TResponse>(this IQueryable<TQueryDataType> source, VueDataTablesQuery query, CancellationToken cancellationToken) where TResponse : DataTablesResponse<TQueryDataType>, new()
+        {
+            return Task.Run(() => FilterDataTable<TQueryDataType, TResponse>(source, query), cancellationToken);
+        }
+
+        /// <summary>
+        /// Aplica o filtro do DataTables na consulta. 
+        /// </summary>
+        /// <typeparam name="TQueryDataType">Tipo do objeto que será retornado no DataTablesResponse, oriundo da query</typeparam>
+        /// <typeparam name="TResponse">Tipo de response que será enviado, contendo o <paramref name="TQueryDataType"/>. Esse objeto precisa herdar de <seealso cref="DataTablesResponse<>" /></typeparam>
+        /// <param name="source">Query não materializada que será utilizada para aplicação do filtro e ordenação</param>
+        /// <param name="query">Objeto query do datatables, contendo os filtros e a ordenação</param>
+        /// <returns>Esse método irá materializar a query, aplicando os filtros e a ordenação do DataTables</returns>
+        public static TResponse FilterDataTable<TQueryDataType, TResponse>(this IQueryable<TQueryDataType> source, VueDataTablesQuery query) where TResponse : DataTablesResponse<TQueryDataType>, new()
+        {
+            var originalSource = source;
+            var totalRecords = source.Count();
+            var recordsFiltered = totalRecords;
+
+            if (query == null)
+                source = source.Take(10);
+
+            if (query != null)
+            {
+                //TODO: implement a column filter
+                //source = source.TryApplyFilter(query);
+                source = source.TryApplySearch(query);
+
+                if (originalSource != source) //Prevent a double count for same result
+                {
+                    recordsFiltered = source.Count();
+                    totalRecords = recordsFiltered; //On VueDT, the total should reflect the filtered count
+                }
+
+                if (query.ItemsPerPage >= 0)
+                    source = source.Skip((query.Page - 1) * query.ItemsPerPage).Take(query.ItemsPerPage);
+
+                source = source.TryApplyOrder(query);
+            }
+
+            return new TResponse()
+            {
+                RecordsTotal = totalRecords,
+                RecordsFiltered = recordsFiltered,
+                Data = source.ToList()
+            };
+        }
+
+        private static IQueryable<T> TryApplyOrder<T>(this IQueryable<T> source, VueDataTablesQuery query)
+        {
+            int count = 0;
+
+            if (query?.SortBy?.Where(x => !string.IsNullOrEmpty(x)).Any() == true)
+            {
+                try
+                {
+                    var properties = typeof(T).GetProperties();
+                    Expression expression = source.Expression;
+                    query.SortBy.ToList().ForEach(column =>
+                    {
+                        if (properties.Any(x => x.Name.Equals(column, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            var parameter = Expression.Parameter(typeof(T), Constants.X);
+                            var selector = Expression.PropertyOrField(parameter, column);
+                            var method = (query.SortDesc?.FirstOrDefault() ?? false) ?
+                                (count == 0 ? Constants.OrderByDescending : Constants.ThenByDescending) :
+                                (count == 0 ? Constants.OrderBy : Constants.ThenBy);
+
+                            expression = Expression.Call(typeof(Queryable), method, new Type[] { source.ElementType, selector.Type }, expression, Expression.Quote(Expression.Lambda(selector, parameter)));
+                        }
+                        count++;
+                    });
+
+                    if (count > 0)
+                        source = source.Provider.CreateQuery<T>(expression);
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine(ex.Message);
+                }
+            }
+            return source;
+        }
+
+        // private static IQueryable<T> TryApplyFilter<T>(this IQueryable<T> source, VueDataTablesQuery query)
+        // {
+        //     if (query.Filters != null && query.Filters.Any())
+        //     {
+        //         try
+        //         {
+        //             //Only retrieve properties listed on query
+        //             var properties = typeof(T)
+        //             .GetProperties()
+        //             .Where(x => query.Filters.Any(p => p.Field.Equals(x.Name, StringComparison.OrdinalIgnoreCase)));
+
+        //             query.Filters.ForEach(filter =>
+        //             {
+        //                 var property = properties.SingleOrDefault(x => x.Name.Equals(filter.Field, StringComparison.OrdinalIgnoreCase));
+        //                 if (property != null)
+        //                     source = source.BuildWhereAndQuery(property, filter.Value);
+        //             });
+        //         }
+        //         catch
+        //         {
+
+        //         }
+        //     }
+
+        //     return source;
+        // }
+
+        private static IQueryable<T> TryApplySearch<T>(this IQueryable<T> source, VueDataTablesQuery query)
+        {
+            if (query?.Headers?.Where(x => !string.IsNullOrEmpty(x.Value) && !string.IsNullOrEmpty(x.Filter)).Any() == true)
+            {
+                var columns = new List<Header>();
+                //Just add valid columns with filter
+                columns.AddRange(
+                    query.Headers
+                    .Where(x => x.Value != null && !string.IsNullOrEmpty(x.Value) && !string.IsNullOrEmpty(x.Filter))
+                );
+                //Get only referenced columns and not generic
+                var properties = typeof(T)
+                            .GetProperties()
+                            .Where(x => !x.PropertyType.IsGenericType)
+                            .Where(x => columns.Any(c => c.Value.Equals(x.Name, StringComparison.OrdinalIgnoreCase)))
+                            .ToList();
+
+                columns.ForEach(column =>
+                {
+                    try
+                    {
+                        List<Expression> predicates = new List<Expression>();
+                        ParameterExpression parameter = Expression.Parameter(typeof(T), Constants.X);
+
+                        properties.ForEach(property =>
+                        {
+                            if (!column.Value.Equals(property.Name, StringComparison.OrdinalIgnoreCase))
+                                return;
+
+                            Expression selector = Expression.PropertyOrField(parameter, property.Name);
+                            Expression predicate = selector.BuildPredicate(property, column.Filter);
+
+                            if (predicate != null)
+                                predicates.Add(predicate);
+                        });
+
+                        source = source.BuildWhereOrQuery(predicates, parameter);
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine(ex.Message);
+                    }
+                });
+            }
+            return source;
+        }
+
+
+        #endregion
+
+
+        #region DataTablesNet
 
         /// <summary>
         /// Aplica o filtro do DataTables na consulta. 
@@ -63,21 +238,6 @@ namespace Massena.DataTables.Query.Extensions
                 RecordsFiltered = recordsFiltered,
                 Data = source.ToList()
             };
-        }
-
-        /// <summary>
-        /// Define constants strings used by DataTables.Net
-        /// </summary>
-        internal class Constants
-        {
-            public const string X = "x";
-            public const string Contains = "Contains";            
-            public const string Where = "Where";
-            public const string Desc = "desc";
-            public const string OrderBy = "OrderBy";
-            public const string ThenBy = "ThenBy";
-            public const string OrderByDescending = "OrderByDescending";
-            public const string ThenByDescending = "ThenByDescending";
         }
 
         private static IQueryable<T> TryApplyOrder<T>(this IQueryable<T> source, DataTablesQuery query)
@@ -191,6 +351,24 @@ namespace Massena.DataTables.Query.Extensions
             return source;
         }
 
+        #endregion
+
+
+
+        /// <summary>
+        /// Define constants strings used by DataTables.Net
+        /// </summary>
+        internal class Constants
+        {
+            public const string X = "x";
+            public const string Contains = "Contains";
+            public const string Where = "Where";
+            public const string Desc = "desc";
+            public const string OrderBy = "OrderBy";
+            public const string ThenBy = "ThenBy";
+            public const string OrderByDescending = "OrderByDescending";
+            public const string ThenByDescending = "ThenByDescending";
+        }
 
         /// <summary>
         /// Pega a query corrente, e injeta os parametros na clausula Where, usando a engine do Linq
@@ -240,19 +418,6 @@ namespace Massena.DataTables.Query.Extensions
             return source;
         }
 
-        /// <summary>
-        /// A simple list of available types used to build queries
-        /// </summary>
-        private static readonly Type[] AvailableTypes = new Type[] {
-            typeof(string),
-            typeof(int),
-            typeof(DateTime),
-            typeof(bool),
-            typeof(Int32),
-            typeof(Int16),
-            typeof(Int64)
-        };
-
         private static IQueryable<T> BuildWhereAndQuery<T>(this IQueryable<T> source, PropertyInfo property, string value)
         {
             try
@@ -283,10 +448,8 @@ namespace Massena.DataTables.Query.Extensions
                 return TryConvertQueryValue(property, selector, queryValue);
         }
 
-
         private static Expression TryConvertQueryValue(PropertyInfo property, Expression selector, string queryValue)
         {
-
             var converter = TypeDescriptor.GetConverter(property.PropertyType);
             try
             {
@@ -297,9 +460,9 @@ namespace Massena.DataTables.Query.Extensions
                     return Expression.Equal(selector, Expression.Convert(selectorValue, property.PropertyType));
                 }
             }
-            catch
+            catch (Exception ex)
             {
-
+                Debug.WriteLine(ex.Message);
             }
             return null;
         }

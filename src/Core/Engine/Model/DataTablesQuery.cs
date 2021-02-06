@@ -2,7 +2,43 @@
 
 namespace Massena.DataTables.Query.Extensions.Model
 {
-    public class DataTablesQuery 
+
+    // {"page":1,"itemsPerPage":10,"sortBy":[],"sortDesc":[],"groupBy":[],"groupDesc":[],"mustSort":false,"multiSort":false}
+
+    /// <summary>
+    /// In general used for Vue datatables - v-data-table
+    /// </summary>
+    public class VueDataTablesQuery
+    {
+        public int Page { get; set; }
+        public int ItemsPerPage { get; set; }
+        public bool MustSort { get; set; }
+        public bool MultiSort { get; set; }
+
+        public IEnumerable<string> SortBy { get; set; }
+        public IEnumerable<bool> SortDesc { get; set; }
+        public IEnumerable<string> GroupBy { get; set; }
+        public IEnumerable<string> GroupDesc { get; set; }
+
+        public IEnumerable<Header> Headers { get; set; }
+
+        public class Header {
+            //Display text
+            public string Text { get;set; }
+            //Data value field, same as ViewModel
+            public string Value { get; set; }
+            //Text to be filtered
+            public string Filter { get; set; }
+        }
+    }
+
+
+
+
+    /// <summary>
+    /// In general used for datatables.net grid system
+    /// </summary>
+    public class DataTablesQuery
     {
         public DataTablesQuery()
         {
